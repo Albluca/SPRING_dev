@@ -117,7 +117,7 @@ timef = new_dir + '/lognewspringtime.txt'
 cell_filter = np.load(current_dir + '/cell_filter.npy')[extra_filter]
 np.save(new_dir + '/cell_filter.npy', cell_filter)
 np.savetxt(new_dir + '/cell_filter.txt', cell_filter, fmt='%i')
-gene_list = np.loadtxt(base_dir + '/genes.txt', dtype=str, delimiter='\t')
+gene_list = np.loadtxt(base_dir + '/genes.txt', dtype=str, delimiter='\t', comments="")
 prefix_map = {}
 for g in gene_list: prefix_map[g.split()[0]] = g
 for g in gene_list: prefix_map[g.split()[-1]] = g
@@ -139,17 +139,22 @@ update_log_html(logf, 'Calculating stats...')
 t0 = time.time()
 means = E.mean(0).A.squeeze()
 stdevs = np.sqrt(sparse_var(E, 0))
+mins = E.min(0).A.squeeze()
 maxes = E.max(0).A.squeeze()
 color_stats = {}
-
-pctls = np.zeros(E.shape[1])
-color_stats = {}
+pctl = 99.6
+pctl_n = (100-pctl) / 100. * E.shape[0]
+pctls = np.zeros(E.shape[1], dtype=float)
 for iG in range(E.shape[1]):
-    pctls[iG] = np.percentile(E[:,iG].A, 99.6)
-    color_stats[gene_list[iG]] = (means[iG], stdevs[iG], 0, maxes[iG], pctls[iG])
+    n_nonzero = E.indptr[iG+1] - E.indptr[iG]
+    if n_nonzero > pctl_n:
+        pctls[iG] = np.percentile(E.data[E.indptr[iG]:E.indptr[iG+1]], 100 - 100 * pctl_n / n_nonzero)
+    else:
+        pctls[iG] = 0
+    color_stats[gene_list[iG]] = tuple(map(float, (means[iG], stdevs[iG], mins[iG], maxes[iG], pctls[iG])))
+
 t1 = time.time()
 update_log(timef, 'Stats computed -- %.2f' %(t1-t0))
-
 
 ################
 # Save color stats, custom colors
@@ -179,7 +184,7 @@ new_cell_groupings = {}
 if len(cell_groupings) > 0:
     for k in cell_groupings:
         new_cell_groupings[k] = {}
-        new_cell_groupings[k]['label_list'] = [cell_groupings[k]['label_list'][i] for i in extra_filter]
+        new_cell_groupings[k]['label_list'] = [str(cell_groupings[k]['label_list'][i]) for i in extra_filter]
         uniq_groups = np.unique(np.array(new_cell_groupings[k]['label_list']))
 
         new_cell_groupings[k]['label_colors'] = {}
@@ -224,7 +229,11 @@ with open(new_dir+'/filtered_genes.tsv','w') as o:
 t0 = time.time()
 update_log_html(logf, 'Running PCA...')
 num_pc = np.min([num_pc,len(gene_filter)])
-Epca = get_PCA_sparseInput(E[:,gene_filter], numpc=num_pc, method='', base_ix=base_ix)
+if E.shape[0] > 50000:
+    pca_method = 'sparse'
+else:
+    pca_method = ''
+Epca = get_PCA_sparseInput(E[:,gene_filter], numpc=num_pc, method=pca_method, base_ix=base_ix)
 t1 = time.time()
 update_log(timef, 'PCA done -- %.2f' %(t1-t0))
 
@@ -234,7 +243,11 @@ np.savetxt(new_dir+'/pca.csv', Epca, delimiter=',')
 # Get KNN graph
 t0 = time.time()
 update_log_html(logf, 'Building kNN graph...')
-links, knn_graph = get_knn_graph2(Epca, k=k_neigh, dist_metric = 'euclidean', approx=False)
+if Epca.shape[0] > 50000:
+    approx = True
+else:
+    approx = False
+links, knn_graph = get_knn_graph2(Epca, k=k_neigh, dist_metric = 'euclidean', approx=approx)
 links = list(links)
 t1 = time.time()
 update_log(timef, 'KNN built -- %.2f' %(t1-t0))
@@ -311,23 +324,27 @@ np.savetxt(new_dir + '/' +  'coordinates.txt', np.hstack((np.arange(E.shape[0])[
 ################
 # Save new clone data if it exists in base dir
 if os.path.exists(current_dir + '/clone_map.json'):
-    clone_map = json.load(open(current_dir + '/clone_map.json'))
+    clone_map_dict = json.load(open(current_dir + '/clone_map.json'))
     extra_filter_map = {i:j for j,i in enumerate(extra_filter)}
-    new_clone_map = {}
-    for i,clone in clone_map.items():
-        i = int(i)
-        new_clone = [extra_filter_map[j] for j in clone if j in extra_filter_map]
-        if i in extra_filter_map and len(new_clone) > 0:
-            new_clone_map[extra_filter_map[i]] = new_clone
-    json.dump(new_clone_map,open(new_dir+'/clone_map.json','w'))
+    new_clone_map_dict = {}
+    for k, clone_map in clone_map_dict.items():
+        new_clone_map = {}
+        for i,clone in clone_map.items():
+            i = int(i)
+            new_clone = [extra_filter_map[j] for j in clone if j in extra_filter_map]
+            if i in extra_filter_map and len(new_clone) > 0:
+                new_clone_map[extra_filter_map[i]] = new_clone
+        new_clone_map_dict[k] = new_clone_map
+    json.dump(new_clone_map_dict,open(new_dir+'/clone_map.json','w'))
+
 
 ################
 # Save PCA, gene filter, total counts
 if os.path.exists(base_dir + '/total_counts.txt'):
-    total_counts = np.loadtxt(base_dir + '/total_counts.txt')[cell_filter]
-    np.savez_compressed(new_dir + 'intermediates.npz', Epca = Epca, gene_filter = gene_filter, total_counts = total_counts)
+    total_counts = np.loadtxt(base_dir + '/total_counts.txt', comments="")[cell_filter]
+    np.savez_compressed(new_dir + '/intermediates.npz', Epca = Epca, gene_filter = gene_filter, total_counts = total_counts)
 else:
-    np.savez_compressed(new_dir + 'intermediates.npz', Epca = Epca, gene_filter = gene_filter)
+    np.savez_compressed(new_dir + '/intermediates.npz', Epca = Epca, gene_filter = gene_filter)
 
         
 ################
